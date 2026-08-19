@@ -1,66 +1,47 @@
 import base64
+import io
 import requests
 
 
 OLLAMA_URL = "http://192.168.0.169:11434/api/chat"
 MODEL = "gemma4:26b"
 
+# Max image dimension before resizing — larger images = slower model
+MAX_IMAGE_SIZE = 1024
 
-VISION_ANALYSIS_PROMPT = """You are a senior medical officer in India reviewing a photographed or scanned medical prescription.
 
-Look carefully at the image. Read all visible text — handwritten cursive, printed text, stamps, and headers.
+# ------------------------------------------------------------------
+# Single prompt — extracts + enriches in one call
+# No Pass 2 needed
+# ------------------------------------------------------------------
 
-READING GUIDE:
-- Read the doctor name and clinic/hospital name from the header
-- Read patient name, age, sex, date from the top fields
-- Read all medicines — they usually start with Tab., Syp., Cap., Inj.
-- Read dosage patterns like 1+0+1, 2+0+2, 50mg, 2.5ml, BD, TDS, OD
-- Read diagnosis from any diagnosis field or infer from medicines prescribed
-- Read any instructions, follow-up notes, warnings, or advisory text
+VISION_PROMPT = """You are a senior medical officer in India reviewing a photographed or scanned medical prescription.
 
-COMMON ABBREVIATIONS:
-- Tab. = Tablet, Syp. = Syrup, Cap. = Capsule, Inj. = Injection
-- 1+0+1 = twice daily (morning + night)
-- 1+1+1 = three times daily
-- 0+0+1 = once at night
-- 1+0+0 = once in morning
-- 2+0+2 = twice daily 2 tablets
-- BD = twice daily, TDS = three times daily, OD = once daily
-- SOS = as needed, HS = at bedtime
-- R/A = Review after, EEG = test not medicine
-- HTN = Hypertension, DM = Diabetes Mellitus
+Look carefully at the image. Read all visible text — handwritten, printed, stamps, headers.
+
+ABBREVIATIONS:
+- Tab.=Tablet, Syp.=Syrup, Cap.=Capsule, Inj.=Injection
+- 1+0+1=twice daily, 1+1+1=three times daily, 0+0+1=night only, 1+0+0=morning only
+- BD=twice daily, TDS=three times daily, OD=once daily, SOS=as needed, HS=bedtime
+- HTN=Hypertension, DM=Diabetes Mellitus, R/A=Review after, EEG=test not medicine
 
 RULES:
-1. Return ONLY valid JSON. No markdown. No ```json. No explanation.
-2. Do NOT output <think>, thought, or any reasoning.
-3. Read every medicine visible — use medical knowledge to identify partial names.
-4. For diseases — extract from diagnosis field AND infer from medicines if not written.
-5. For prescription_advisory and recovery — extract from image if present. If not, provide standard clinical guidance for the identified conditions.
-6. icd_hint — provide ICD-10 code for each disease.
-7. severity — infer from clinical notes if possible.
-8. summary — one sentence describing the case.
-9. Use null only when truly unreadable.
+1. Return ONLY valid JSON. No markdown. No ```json. No explanation. No reasoning.
+2. Extract every medicine visible — use medical knowledge to identify partial names.
+3. diseases — extract from diagnosis field OR infer from medicines prescribed.
+4. icd_hint — ICD-10 code for each disease.
+5. prescription_advisory and recovery — extract from image if present, otherwise use standard clinical knowledge for the identified conditions and medicines. Do NOT leave these null.
+6. summary — one sentence describing the case.
+7. Use null only when truly unreadable.
 
-Return exactly this structure:
+Return exactly this JSON:
 
 {
   "diseases": [
-    {
-      "name": null,
-      "icd_hint": null,
-      "severity": null,
-      "notes": null
-    }
+    {"name": null, "icd_hint": null, "severity": null, "notes": null}
   ],
   "medicines": [
-    {
-      "name": null,
-      "dosage": null,
-      "frequency": null,
-      "duration": null,
-      "route": "oral",
-      "notes": null
-    }
+    {"name": null, "dosage": null, "frequency": null, "duration": null, "route": "oral", "notes": null}
   ],
   "prescription_advisory": {
     "instructions": null,
@@ -79,133 +60,44 @@ Return exactly this structure:
 """
 
 
-ENRICHMENT_PROMPT_TEMPLATE = """You are a clinical knowledge assistant.
+# ------------------------------------------------------------------
+# Helpers
+# ------------------------------------------------------------------
 
-A patient has been diagnosed with: {diseases}
-Prescribed medicines: {medicines}
+def _resize_and_encode(image_path: str) -> str:
+    """
+    Resize image to MAX_IMAGE_SIZE on the longest side
+    before base64 encoding.
 
-RULES:
-1. Return ONLY valid JSON. No markdown. No ```json. No explanation.
-2. Do NOT output <think>, thought, or reasoning.
-3. Use standard clinical knowledge for this condition and these medicines.
-4. All fields are required — do not use null.
-5. Keep responses concise and practical.
+    Smaller image = faster vision model processing.
+    Most prescriptions are readable at 1024px.
+    """
+    try:
+        import cv2
+        import numpy as np
 
-Return exactly this structure:
+        img = cv2.imread(image_path)
+        if img is None:
+            raise ValueError("cv2 could not read image")
 
-{{
-  "prescription_advisory": {{
-    "instructions": null,
-    "warnings": null,
-    "precautions": null,
-    "follow_up": null
-  }},
-  "recovery": {{
-    "expected_duration": null,
-    "lifestyle_advice": null,
-    "diet_advice": null,
-    "activity_restrictions": null
-  }}
-}}
-"""
+        h, w = img.shape[:2]
+        longest = max(h, w)
 
+        if longest > MAX_IMAGE_SIZE:
+            scale = MAX_IMAGE_SIZE / longest
+            img = cv2.resize(
+                img,
+                (int(w * scale), int(h * scale)),
+                interpolation=cv2.INTER_AREA
+            )
 
+        _, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        return base64.b64encode(buf.tobytes()).decode("utf-8")
 
-def _encode_image(image_path: str) -> str:
-    """Base64-encode an image file for the Ollama API."""
-    with open(image_path, "rb") as f:
-        return base64.b64encode(f.read()).decode("utf-8")
-
-
-def _call_vision(image_path: str, prompt: str, timeout: int = 600, num_predict: int = 2048) -> str:
-    """Send image + prompt to gemma4:26b and return raw response."""
-
-    image_b64 = _encode_image(image_path)
-
-    print("\n" + "=" * 60)
-    print(f"VISION CALL → {MODEL}")
-    print("=" * 60)
-    print(prompt[:300], "...")
-    print("=" * 60 + "\n")
-
-    response = requests.post(
-        OLLAMA_URL,
-        json={
-            "model": MODEL,
-            "stream": False,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": "You are a medical assistant. Return only valid JSON. No markdown. No thinking. No explanation."
-                },
-                {
-                    "role": "user",
-                    "content": prompt,
-                    "images": [image_b64]
-                }
-            ],
-            "options": {
-                "temperature": 0,
-                "num_predict": num_predict
-            }
-        },
-        timeout=timeout
-    )
-
-    response.raise_for_status()
-    raw = response.json()["message"]["content"]
-
-    print("\n" + "=" * 60)
-    print("RAW RESPONSE FROM MODEL:")
-    print("=" * 60)
-    print(raw)
-    print("=" * 60 + "\n")
-
-    return raw
-
-
-def _call_text(prompt: str, timeout: int = 300, num_predict: int = 1024) -> str:
-    """Send a text-only prompt to gemma4:26b for enrichment."""
-
-    print("\n" + "=" * 60)
-    print(f"TEXT CALL → {MODEL}")
-    print("=" * 60)
-    print(prompt[:300], "...")
-    print("=" * 60 + "\n")
-
-    response = requests.post(
-        OLLAMA_URL,
-        json={
-            "model": MODEL,
-            "stream": False,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": "You are a medical assistant. Return only valid JSON. No markdown. No thinking. No explanation."
-                },
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ],
-            "options": {
-                "temperature": 0,
-                "num_predict": num_predict
-            }
-        },
-        timeout=timeout
-    )
-
-    response.raise_for_status()
-    raw = response.json()["message"]["content"]
-
-    print("\n" + "=" * 60)
-    print("RAW ENRICHMENT RESPONSE:")
-    print("=" * 60)
-    print(raw)
-    print("=" * 60 + "\n")
-
-    return raw
+    except Exception:
+        # cv2 not available — encode original file as-is
+        with open(image_path, "rb") as f:
+            return base64.b64encode(f.read()).decode("utf-8")
 
 
 # ------------------------------------------------------------------
@@ -214,10 +106,10 @@ def _call_text(prompt: str, timeout: int = 300, num_predict: int = 1024) -> str:
 
 def analyze_image(image_path: str) -> str:
     """
-    Send image directly to gemma4:26b for medical analysis.
+    Send image directly to gemma4:26b.
 
-    No Tesseract. No layout reconstruction. No preprocessing.
-    The vision model reads the image and returns structured JSON.
+    Single call — extracts diseases, medicines, advisory,
+    and recovery all at once. No second enrichment call needed.
 
     Args:
         image_path: path to the uploaded medical image
@@ -225,33 +117,42 @@ def analyze_image(image_path: str) -> str:
     Returns:
         Raw string from model (JSON inside)
     """
-    return _call_vision(image_path, VISION_ANALYSIS_PROMPT, timeout=600, num_predict=2048)
 
+    image_b64 = _resize_and_encode(image_path)
 
-def enrich_analysis(disease_names: list, medicines: list) -> str:
-    """
-    Fill null prescription_advisory and recovery fields
-    using clinical knowledge of identified diseases and medicines.
+    print(f"\n>>> Sending to {MODEL} ...")
 
-    Args:
-        disease_names: list of disease name strings from Pass 1
-        medicines:     list of medicine dicts from Pass 1
-
-    Returns:
-        Raw string from model (JSON inside)
-    """
-
-    diseases_str = ", ".join(disease_names) if disease_names else "unknown condition"
-
-    medicine_names = [
-        m.get("name") for m in medicines
-        if m.get("name") and m.get("name") != "null"
-    ]
-    medicines_str = ", ".join(medicine_names) if medicine_names else "not specified"
-
-    prompt = ENRICHMENT_PROMPT_TEMPLATE.format(
-        diseases=diseases_str,
-        medicines=medicines_str
+    response = requests.post(
+        OLLAMA_URL,
+        json={
+            "model": MODEL,
+            "stream": False,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You are a medical assistant. Return only valid JSON. No markdown. No thinking. No explanation."
+                },
+                {
+                    "role": "user",
+                    "content": VISION_PROMPT,
+                    "images": [image_b64]
+                }
+            ],
+            "options": {
+                "temperature": 0,
+                "num_predict": 800
+            }
+        },
+        timeout=600
     )
 
-    return _call_text(prompt, timeout=300, num_predict=1024)
+    response.raise_for_status()
+    raw = response.json()["message"]["content"]
+
+    print("\n" + "=" * 60)
+    print("MODEL RESPONSE:")
+    print("=" * 60)
+    print(raw)
+    print("=" * 60 + "\n")
+
+    return raw
