@@ -3,13 +3,25 @@ import uuid
 import os
 import json
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from ocr.llm_cleaner import analyze_image
+
+load_dotenv()
 
 app = FastAPI()
 
-UPLOAD_DIR = "uploads"
+UPLOAD_DIR = os.getenv("UPLOAD_DIR", "uploads")
+CORS_ORIGIN = os.getenv("CORS_ORIGIN", "http://localhost:8080")
 ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff", ".tif"}
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[CORS_ORIGIN],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
@@ -31,13 +43,11 @@ def unique_file_path(filename: str) -> str:
 def parse_llm_response(raw: str) -> dict:
     text = raw
 
-    # Strip thinking blocks
     text = re.sub(r"<think>[\s\S]*?</think>", "", text)
     text = re.sub(r"<unused\d+>\s*thought[\s\S]*?<unused\d+>", "", text)
     text = re.sub(r"<unused\d+>", "", text)
     text = text.strip()
 
-    # Strip ```json ... ``` fences
     fence_match = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
     if fence_match:
         text = fence_match.group(1).strip()
@@ -47,7 +57,6 @@ def parse_llm_response(raw: str) -> dict:
     except json.JSONDecodeError:
         pass
 
-    # Find outermost { ... } block
     start = text.find("{")
     end = text.rfind("}")
     if start != -1 and end != -1 and end > start:
@@ -61,22 +70,25 @@ def parse_llm_response(raw: str) -> dict:
 
 @app.get("/")
 def home():
-    return {"message": "Health OCR server is running — gemma4:26b"}
+    return {"message": "Health LLM Application server is running — gemma4:26b"}
 
 
 @app.post("/analyze")
+
+# Step 1
 async def analyze(file: UploadFile = File(...)):
 
-    # Validate
+    # Step 2
     validate_file_type(file.filename)
-
-    # Save
+    
+    # Step 3
     file_path = unique_file_path(file.filename)
     contents = await file.read()
     with open(file_path, "wb") as f:
         f.write(contents)
 
     # Send to gemma4:26b
+    # Step 4
     try:
         raw_response = analyze_image(file_path)
     except Exception as e:
@@ -85,7 +97,7 @@ async def analyze(file: UploadFile = File(...)):
             detail=f"Model unavailable. Ensure Ollama is running with gemma4:26b. Error: {str(e)}"
         )
 
-    # Parse
+    # Step 5 
     analysis = parse_llm_response(raw_response)
 
     if "raw_response" in analysis:

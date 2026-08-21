@@ -1,19 +1,17 @@
 import base64
-import io
+import os
 import requests
+from dotenv import load_dotenv
+
+load_dotenv()
+
+OLLAMA_URL     = os.getenv("OLLAMA_URL",       "http://192.168.0.169:11434/api/chat")
+MODEL          = os.getenv("OLLAMA_MODEL",      "gemma4:26b")
+NUM_PREDICT    = int(os.getenv("OLLAMA_NUM_PREDICT", "800"))
+TIMEOUT        = int(os.getenv("OLLAMA_TIMEOUT",     "600"))
+MAX_IMAGE_SIZE = int(os.getenv("MAX_IMAGE_SIZE",     "1024"))
 
 
-OLLAMA_URL = "http://192.168.0.169:11434/api/chat"
-MODEL = "gemma4:26b"
-
-# Max image dimension before resizing — larger images = slower model
-MAX_IMAGE_SIZE = 1024
-
-
-# ------------------------------------------------------------------
-# Single prompt — extracts + enriches in one call
-# No Pass 2 needed
-# ------------------------------------------------------------------
 
 VISION_PROMPT = """You are a senior medical officer in India reviewing a photographed or scanned medical prescription.
 
@@ -60,10 +58,7 @@ Return exactly this JSON:
 """
 
 
-# ------------------------------------------------------------------
-# Helpers
-# ------------------------------------------------------------------
-
+# Step 6
 def _resize_and_encode(image_path: str) -> str:
     """
     Resize image to MAX_IMAGE_SIZE on the longest side
@@ -95,15 +90,12 @@ def _resize_and_encode(image_path: str) -> str:
         return base64.b64encode(buf.tobytes()).decode("utf-8")
 
     except Exception:
-        # cv2 not available — encode original file as-is
         with open(image_path, "rb") as f:
             return base64.b64encode(f.read()).decode("utf-8")
 
 
-# ------------------------------------------------------------------
 # Public API
-# ------------------------------------------------------------------
-
+# Step 5
 def analyze_image(image_path: str) -> str:
     """
     Send image directly to gemma4:26b.
@@ -140,10 +132,10 @@ def analyze_image(image_path: str) -> str:
             ],
             "options": {
                 "temperature": 0,
-                "num_predict": 800
+                "num_predict": NUM_PREDICT
             }
         },
-        timeout=600
+        timeout=TIMEOUT
     )
 
     response.raise_for_status()
