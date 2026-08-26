@@ -69,6 +69,7 @@ def parse_llm_response(raw: str) -> dict:
 
 
 @app.get("/")
+
 def home():
     return {"message": "Health LLM Application server is running — gemma4:26b"}
 
@@ -91,6 +92,7 @@ async def analyze(file: UploadFile = File(...)):
     # Step 4
     try:
         raw_response = analyze_image(file_path)
+        print(raw_response, 'raw_response')
     except Exception as e:
         raise HTTPException(
             status_code=503,

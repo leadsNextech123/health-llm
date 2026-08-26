@@ -13,7 +13,7 @@ MAX_IMAGE_SIZE = int(os.getenv("MAX_IMAGE_SIZE",     "1024"))
 
 
 
-VISION_PROMPT = """You are a senior medical officer in India reviewing a photographed or scanned medical prescription.
+VISION_PROMPT = """You are a senior medical officer and wellness advisor in India reviewing a photographed or scanned medical prescription.
 
 Look carefully at the image. Read all visible text — handwritten, printed, stamps, headers.
 
@@ -28,9 +28,20 @@ RULES:
 2. Extract every medicine visible — use medical knowledge to identify partial names.
 3. diseases — extract from diagnosis field OR infer from medicines prescribed.
 4. icd_hint — ICD-10 code for each disease.
-5. prescription_advisory and recovery — extract from image if present, otherwise use standard clinical knowledge for the identified conditions and medicines. Do NOT leave these null.
-6. summary — one sentence describing the case.
-7. Use null only when truly unreadable.
+5. summary — one sentence describing the case.
+6. Use null only when truly unreadable.
+
+FOR prescription_advisory — extract from image if present, then provide complete clinical guidance:
+- instructions: exact timing of medicines (before/after food, morning/night), how to take them
+- warnings: side effects to watch for, drug interactions, danger signs that need immediate attention
+- precautions: what to strictly avoid — alcohol, certain foods, sun exposure, driving, stopping medicine suddenly
+- follow_up: when to revisit doctor, what tests to get done, symptoms that need emergency care
+
+FOR recovery — always provide detailed practical Indian lifestyle guidance based on the condition:
+- expected_duration: realistic recovery timeline with stages (e.g. "Week 1: rest, Week 2-4: light activity")
+- lifestyle_advice: specific daily routine — morning walk duration (e.g. 30 min brisk walk), yoga poses relevant to condition, breathing exercises, sleep hours, stress management tips, posture advice, hydration (glasses of water per day)
+- diet_advice: specific foods TO EAT with examples (e.g. "spinach, methi, dal for iron"), specific fruits that help (e.g. "banana for potassium, papaya for digestion, amla for immunity"), foods TO STRICTLY AVOID with reasons, meal timing (e.g. "eat small meals every 3 hours"), Indian diet tips relevant to the condition, hydration advice
+- activity_restrictions: specific activities to avoid (heavy lifting, climbing stairs, driving, sports, screen time limits) and when these restrictions can be lifted
 
 Return exactly this JSON:
 
